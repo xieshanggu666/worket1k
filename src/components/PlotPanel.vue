@@ -19,16 +19,25 @@
         <span>🐛 虫害</span><div class="bar"><i :style="{width: Math.min(100,p.pest*40)+'%',background:'#ef5350'}"></i></div><b>{{ p.pest>0?p.pest:'' }}</b>
       </div>
 
-      <!-- 灌溉：接通状态 + 供水优先级 -->
+      <!-- 灌溉：接通状态 + 供水优先级 + 目标水分 -->
       <div class="irr-row">
         <span class="irr-state" :class="{on: p.irrigated}">{{ p.irrigated ? '💧 灌溉已接通' : '🚱 未接通水渠' }}</span>
         <span class="irr-prio">
-          优先级
+          保水优先级
           <button v-for="(l, i) in ['低','中','高']" :key="i"
                   :class="{sel: (p.irr_priority ?? 1) === i}"
                   @click="store.setIrrPriority(p.id, i)">{{ l }}</button>
         </span>
       </div>
+      <div class="irr-row">
+        <span class="irr-target-label">🎯 目标水分 <b>{{ p.irr_target ?? 100 }}</b></span>
+        <span class="irr-prio">
+          <button v-for="t in [0, 40, 60, 80, 100]" :key="t"
+                  :class="{sel: (p.irr_target ?? 100) === t}"
+                  @click="store.setIrrTarget(p.id, t)">{{ t === 0 ? '关' : t }}</button>
+        </span>
+      </div>
+      <p class="irr-tip" v-if="(p.irr_target ?? 100) === 0">目标水分为 0：该地块不参与自动浇水</p>
 
       <div class="divider"></div>
 
@@ -121,6 +130,9 @@ h3 { margin:0 0 10px;color:#fff;font-size:15px; }
   padding:2px 7px;font-size:10px;cursor:pointer;
 }
 .irr-prio button.sel { background:#0277bd;color:#fff;border-color:#29b6f6; }
+.irr-target-label { color:#6f84ab; }
+.irr-target-label b { color:#4fc3f7; }
+.irr-tip { color:#5b6f94;font-size:10px;margin:4px 0 0; }
 
 .seed-crops { display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;max-height:180px;overflow-y:auto; }
 .seed-opt {

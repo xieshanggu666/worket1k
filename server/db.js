@@ -111,6 +111,19 @@ CREATE TABLE IF NOT EXISTS irrigation (
   UNIQUE(x, y)
 );
 
+-- 灌溉逐日分配结果：同一连通网络内的多座蓄水池统一分水后，
+-- 记录每个地块「需水量 / 实供水量」，缺水时前端据此展示分配明细；
+-- UNIQUE(abs_day, plot_id) 保证同一天只结算一次，重试不会重复写入
+CREATE TABLE IF NOT EXISTS irrigation_alloc (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  abs_day INTEGER NOT NULL,
+  net INTEGER NOT NULL,               -- 当日供水网络编号（1 起，按网络排序）
+  plot_id INTEGER NOT NULL,
+  need INTEGER NOT NULL,              -- 达到目标水分所需水量
+  given INTEGER NOT NULL,             -- 实际供水量（<need 即缺水）
+  UNIQUE(abs_day, plot_id)
+);
+
 -- 加工生产工单：批量排产，按游戏天串行推进；取消时记录取消绝对日用于退料与队列重排
 CREATE TABLE IF NOT EXISTS production_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -196,4 +209,8 @@ db.exec("INSERT OR IGNORE INTO sqlite_sequence(name,seq) VALUES('crop_varieties'
 const plotCols = db.prepare('PRAGMA table_info(plots)').all().map((c) => c.name)
 if (!plotCols.includes('irr_priority')) {
   db.exec('ALTER TABLE plots ADD COLUMN irr_priority INTEGER NOT NULL DEFAULT 1')
+}
+// 兼容旧存档：plots 增加目标水分（0~100，每日供水浇到该值即止；0 = 不自动浇水）
+if (!plotCols.includes('irr_target')) {
+  db.exec('ALTER TABLE plots ADD COLUMN irr_target INTEGER NOT NULL DEFAULT 100')
 }

@@ -28,6 +28,8 @@ export const useGameStore = defineStore('game', {
     breeding: null,
     irrigation: [],
     irrigationCosts: { reservoir: 60, canal: 8 },
+    irrigationNets: [],                          // 供水网络概览（多池联网统一分水）
+    irrigationAlloc: { day: null, rows: [] },    // 最近一天逐地块分配结果（缺水明细）
     irrBuildMode: null,      // 'reservoir' | 'canal' | null：地图放置模式
     selectedPlot: null,
     seedMode: false,
@@ -70,6 +72,8 @@ export const useGameStore = defineStore('game', {
       this.breeding = d.breeding || null
       this.irrigation = d.irrigation || []
       this.irrigationCosts = d.irrigationCosts || this.irrigationCosts
+      this.irrigationNets = d.irrigationNets || []
+      this.irrigationAlloc = d.irrigationAlloc || { day: null, rows: [] }
       this.loaded = true
     },
     pushLog(msg, type = 'info') {
@@ -221,19 +225,26 @@ export const useGameStore = defineStore('game', {
       try {
         const r = await api('/irrigation/toggle', 'POST', { id })
         await this.load()
-        this.showToast(r.active ? '已启用，恢复供水' : '已停用，供水网络断流', 'info')
+        const net = `供水重算：${r.nets} 个网络 / ${r.served} 块地接通`
+        this.showToast(r.active ? `已启用，恢复供水（${net}）` : `已停用，断流（${net}）`, 'info')
       } catch (e) { this.showToast(e.message, 'warn') }
     },
     async demolishIrrigation(id) {
       try {
         const r = await api('/irrigation/demolish', 'POST', { id })
         await this.load()
-        this.showToast(`已拆除，返还 🪙${r.refund}`, 'info')
+        this.showToast(`已拆除，返还 🪙${r.refund}（供水重算：${r.nets} 个网络 / ${r.served} 块地接通）`, 'info')
       } catch (e) { this.showToast(e.message, 'warn') }
     },
     async setIrrPriority(plotId, priority) {
       try {
         await api('/irrigation/priority', 'POST', { plotId, priority })
+        await this.load()
+      } catch (e) { this.showToast(e.message, 'warn') }
+    },
+    async setIrrTarget(plotId, target) {
+      try {
+        await api('/irrigation/target', 'POST', { plotId, target })
         await this.load()
       } catch (e) { this.showToast(e.message, 'warn') }
     },

@@ -6,8 +6,8 @@ import {
   settleProduction, enqueueJob, cancelJob, collectJobs
 } from './production.js'
 import {
-  COSTS as IRR_COSTS, RESERVOIR_CAP, networkInfo,
-  settleIrrigation, buildFacility, toggleFacility, demolishFacility
+  COSTS as IRR_COSTS, RESERVOIR_CAP, networkInfo, latestAlloc,
+  settleIrrigation, buildFacility, toggleFacility, demolishFacility, setPlotTarget
 } from './irrigation.js'
 import {
   TRAITS, BREED_GOLD, breedCapacity,
@@ -109,7 +109,9 @@ app.get('/api/state', (req, res) => {
       cap: f.kind === 'reservoir' ? RESERVOIR_CAP : null,
       linked: f.kind === 'canal' ? net.canalIds.has(f.id) : !!f.active
     })),
-    irrigationCosts: IRR_COSTS
+    irrigationCosts: IRR_COSTS,
+    irrigationNets: net.networks,      // 供水网络概览（联网池数/总水量/需求/预计日耗）
+    irrigationAlloc: latestAlloc()     // 最近一天的逐地块分配结果（缺水明细）
   })
 })
 
@@ -388,6 +390,15 @@ app.post('/api/irrigation/priority', (req, res) => {
   res.json({ ok: true, priority })
 })
 
+// 设置地块目标水分（0~100，浇到即止；0 = 不自动浇水）
+app.post('/api/irrigation/target', (req, res) => {
+  try {
+    res.json(setPlotTarget(Number(req.body?.plotId), req.body?.target))
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
 // ===== 杂交育种 =====
 // 开始试验：两批作物 parentA/parentB，格式 base:<id> 或 var:<id>
 app.post('/api/breeding/start', (req, res) => {
@@ -513,8 +524,8 @@ function advanceDay() {
       health = Math.max(0, Math.min(100, health))
       run(`UPDATE animals SET feed=?,health=?,ready=1 WHERE id=?`, feed, health, a.id)
     }
-    // —— 灌溉：降雨补水/干旱耗水，蓄水池按连通关系与优先级分配有限水量 ——
-    logs.push(...settleIrrigation(wType, wSev))
+    // —— 灌溉：降雨补水/干旱耗水，同一网络多池统一分水，按目标水分与优先级调度 ——
+    logs.push(...settleIrrigation(wType, wSev, p.abs_day))
     // —— 育种：试验随天推进，受养护（水分/肥力/照料）与天气影响，成熟产出新品种种子 ——
     logs.push(...settleBreeding({ type: wType, severity: wSev, mods }, p.abs_day + 1))
     // 天数推进与季节轮转
