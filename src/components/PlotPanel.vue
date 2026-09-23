@@ -19,16 +19,26 @@
         <span>🐛 虫害</span><div class="bar"><i :style="{width: Math.min(100,p.pest*40)+'%',background:'#ef5350'}"></i></div><b>{{ p.pest>0?p.pest:'' }}</b>
       </div>
 
-      <!-- 灌溉：接通状态 + 供水优先级 -->
+      <!-- 灌溉：接通状态 + 保水优先级 + 目标水分 -->
       <div class="irr-row">
         <span class="irr-state" :class="{on: p.irrigated}">{{ p.irrigated ? '💧 灌溉已接通' : '🚱 未接通水渠' }}</span>
         <span class="irr-prio">
-          优先级
+          保水优先级
           <button v-for="(l, i) in ['低','中','高']" :key="i"
                   :class="{sel: (p.irr_priority ?? 1) === i}"
                   @click="store.setIrrPriority(p.id, i)">{{ l }}</button>
         </span>
       </div>
+      <div class="irr-target">
+        <span class="irr-target-label">
+          🎯 目标水分 <b>{{ p.irr_target ?? 100 }}</b>
+          <em v-if="!(p.irr_target ?? 100)">（不自动浇水）</em>
+        </span>
+        <input type="range" min="0" max="100" step="5"
+               :value="p.irr_target ?? 100"
+               @change="store.setIrrTarget(p.id, +$event.target.value)" />
+      </div>
+      <p class="irr-use" v-if="estUse != null">预计日耗水 ≈{{ estUse }}（灌溉按此与天气调度供水）</p>
 
       <div class="divider"></div>
 
@@ -85,6 +95,16 @@ const isGrown = computed(() => crop.value && p.value.stage >= (crop.value.days -
 function barColor(v) { return v < 30 ? '#ef5350' : v < 60 ? '#ffb300' : '#4caf50' }
 function traitDef(k) { return store.breeding?.traits?.[k] || { name: k, icon: '•', good: true, desc: '' } }
 
+// 当前作物的预计日耗水（品种性状修正，与服务端调度估算口径一致；不含天气蒸发）
+const estUse = computed(() => {
+  if (!crop.value) return null
+  const t = crop.value.traits || []
+  let mul = 1
+  if (t.includes('droughthardy')) mul *= 0.5
+  if (t.includes('weak')) mul *= 1.5
+  return Math.round(18 * mul)
+})
+
 // 背包中可播种的种子：seed-<基础id> 与 seed-v<品种id>
 const seedChoices = computed(() => {
   const out = []
@@ -121,6 +141,12 @@ h3 { margin:0 0 10px;color:#fff;font-size:15px; }
   padding:2px 7px;font-size:10px;cursor:pointer;
 }
 .irr-prio button.sel { background:#0277bd;color:#fff;border-color:#29b6f6; }
+.irr-target { display:flex;align-items:center;gap:8px;margin-top:6px;font-size:11px;color:#6f84ab; }
+.irr-target-label { white-space:nowrap; }
+.irr-target-label b { color:#4fc3f7; }
+.irr-target-label em { font-style:normal;color:#8ba2c8; }
+.irr-target input[type=range] { flex:1;accent-color:#29b6f6;height:14px;cursor:pointer; }
+.irr-use { margin:4px 0 0;font-size:10px;color:#5b6f94; }
 
 .seed-crops { display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;max-height:180px;overflow-y:auto; }
 .seed-opt {

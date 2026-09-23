@@ -6,7 +6,7 @@ import {
   settleProduction, enqueueJob, cancelJob, collectJobs
 } from './production.js'
 import {
-  COSTS as IRR_COSTS, RESERVOIR_CAP, networkInfo,
+  COSTS as IRR_COSTS, RESERVOIR_CAP, networkInfo, computeNetworks, lastReport,
   settleIrrigation, buildFacility, toggleFacility, demolishFacility
 } from './irrigation.js'
 import {
@@ -79,7 +79,8 @@ app.get('/api/state', (req, res) => {
   const mill = q1('SELECT * FROM buildings WHERE id=2')
   const lab = q1("SELECT * FROM buildings WHERE name='育种棚'")
   // 供水网络：连通且启用中的地块/水渠（前端绘制供水状态用）
-  const net = networkInfo()
+  const nets = computeNetworks()
+  const net = networkInfo(nets)
   res.json({
     player: p,
     crops: q('SELECT * FROM crops'),
@@ -109,7 +110,13 @@ app.get('/api/state', (req, res) => {
       cap: f.kind === 'reservoir' ? RESERVOIR_CAP : null,
       linked: f.kind === 'canal' ? net.canalIds.has(f.id) : !!f.active
     })),
-    irrigationCosts: IRR_COSTS
+    irrigationCosts: IRR_COSTS,
+    // 供水网络概览（多座蓄水池连通时统一分水）+ 最近一次每日分配结果（缺水时展示明细）
+    irrigationNetworks: nets.filter((n) => n.reservoirs.length).map((n) => ({
+      id: n.id, reservoirs: n.reservoirs.length, canals: n.canalIds.length,
+      plots: n.plotIds.size, water: n.water, cap: n.cap
+    })),
+    irrigationReport: lastReport()
   })
 })
 
@@ -388,6 +395,15 @@ app.post('/api/irrigation/priority', (req, res) => {
   res.json({ ok: true, priority })
 })
 
+// 设置地块目标水分（0~100，灌溉时浇到该水位为止；0 表示不自动浇水）
+app.post('/api/irrigation/target', (req, res) => {
+  const plotId = Number(req.body?.plotId)
+  const target = Math.max(0, Math.min(100, Math.floor(Number(req.body?.target) || 0)))
+  if (!q1('SELECT id FROM plots WHERE id=?', plotId)) return res.status(404).json({ error: 'not found' })
+  run('UPDATE plots SET irr_target=? WHERE id=?', target, plotId)
+  res.json({ ok: true, target })
+})
+
 // ===== 杂交育种 =====
 // 开始试验：两批作物 parentA/parentB，格式 base:<id> 或 var:<id>
 app.post('/api/breeding/start', (req, res) => {
@@ -513,8 +529,8 @@ function advanceDay() {
       health = Math.max(0, Math.min(100, health))
       run(`UPDATE animals SET feed=?,health=?,ready=1 WHERE id=?`, feed, health, a.id)
     }
-    // —— 灌溉：降雨补水/干旱耗水，蓄水池按连通关系与优先级分配有限水量 ——
-    logs.push(...settleIrrigation(wType, wSev))
+    // —— 灌溉：降雨补水/干旱耗水，连通网络内多池统一分水（结合天气与品种耗水调度）——
+    logs.push(...settleIrrigation({ type: wType, severity: wSev, mods }, p.abs_day))
     // —— 育种：试验随天推进，受养护（水分/肥力/照料）与天气影响，成熟产出新品种种子 ——
     logs.push(...settleBreeding({ type: wType, severity: wSev, mods }, p.abs_day + 1))
     // 天数推进与季节轮转

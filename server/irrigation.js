@@ -1,4 +1,6 @@
 import { db } from './db.js'
+import { TRAITS, cropLike } from './breeding.js'
+import { buildNetworks, planAllocation } from './irrigation-core.js'
 
 const q = (sql, ...p) => db.prepare(sql).all(...p)
 const q1 = (sql, ...p) => db.prepare(sql).get(...p)
@@ -15,8 +17,6 @@ export const MAP_H = 10                            // 地图格数（620/60 取�
 // 天气对蓄水池的每日影响：正=降雨补水，负=蒸发耗水（负值乘灾害等级）
 const WEATHER_WATER = { rain: 35, storm: 50, drought: -15, heatwave: -8 }
 
-const DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]]
-
 // 建筑占地（2x2）不可建灌溉设施
 function blockedCells() {
   const blocked = new Set()
@@ -28,49 +28,35 @@ function blockedCells() {
   return blocked
 }
 
-// 从蓄水池出发沿水渠（4连通）BFS：返回连通的地块 id 与途经的水渠 id
-function reachable(res, canals, plots) {
-  const canalAt = new Map(canals.map((c) => [`${c.x},${c.y}`, c]))
-  const plotAt = new Map(plots.map((p) => [`${p.x},${p.y}`, p]))
-  const seen = new Set([`${res.x},${res.y}`])
-  const stack = [[res.x, res.y]]
+// 当前供水网络列表：启用中的蓄水池+水渠按 4 连通分组（含水量/容量汇总）。
+// 停用/拆除的设施不参与，因此断流与恢复都由每日实时重算自然生效。
+export function computeNetworks() {
+  const plots = q('SELECT * FROM plots')
+  const facilities = q('SELECT * FROM irrigation')
+  return buildNetworks(facilities, plots).map((n) => ({
+    ...n,
+    water: n.reservoirs.reduce((s, r) => s + r.water, 0),
+    cap: n.reservoirs.length * RESERVOIR_CAP
+  }))
+}
+
+// 供水网络汇总视图：连通且启用中的地块/水渠 id 集合（前端绘制供水状态用）
+export function networkInfo(networks = computeNetworks()) {
   const plotIds = new Set()
   const canalIds = new Set()
-  while (stack.length) {
-    const [cx, cy] = stack.pop()
-    for (const [dx, dy] of DIRS) {
-      const nx = cx + dx
-      const ny = cy + dy
-      const key = `${nx},${ny}`
-      if (seen.has(key)) continue
-      const canal = canalAt.get(key)
-      if (canal) {
-        seen.add(key)
-        canalIds.add(canal.id)
-        stack.push([nx, ny])
-        continue
-      }
-      const plot = plotAt.get(key)
-      if (plot) plotIds.add(plot.id) // 地块与水渠/蓄水池相邻即接通，不再向外延伸
-    }
+  for (const n of networks) {
+    if (!n.reservoirs.length) continue // 没有蓄水池的网络不供水
+    n.plotIds.forEach((id) => plotIds.add(id))
+    n.canalIds.forEach((id) => canalIds.add(id))
   }
   return { plotIds, canalIds }
 }
 
-// 当前供水网络：启用中的蓄水池沿启用中的水渠能到达的 { plotIds, canalIds }
-// 停用/拆除的设施不参与，因此断流与恢复都由每日实时重算自然生效
-export function networkInfo() {
-  const reservoirs = q("SELECT * FROM irrigation WHERE kind='reservoir' AND active=1")
-  const canals = q("SELECT * FROM irrigation WHERE kind='canal' AND active=1")
-  const plots = q('SELECT id,x,y FROM plots')
-  const plotIds = new Set()
-  const canalIds = new Set()
-  for (const r of reservoirs) {
-    const { plotIds: ps, canalIds: cs } = reachable(r, canals, plots)
-    ps.forEach((id) => plotIds.add(id))
-    cs.forEach((id) => canalIds.add(id))
-  }
-  return { plotIds, canalIds }
+// 最近一次每日供水的分配结果（缺水时前端展示明细）
+export function lastReport() {
+  const row = q1('SELECT detail FROM irrigation_report ORDER BY abs_day DESC LIMIT 1')
+  if (!row) return null
+  try { return JSON.parse(row.detail) } catch { return null }
 }
 
 // 建造蓄水池/水渠：校验地块、占用与金币，事务落库
@@ -134,19 +120,19 @@ export function demolishFacility(id) {
 
 // 逐日结算（在 advanceDay 事务内调用，不另开事务）：
 // 1) 天气影响：降雨/暴雨为蓄水池补水，干旱/酷暑加速蒸发
-// 2) 供水分配：每个启用蓄水池沿启用水渠找连通地块，
-//    按 优先级高→低、同级水分低者优先 的顺序把有限水量分配到地块，耗尽即止
-// 3) 干涸断流预警
-export function settleIrrigation(weatherType, severity = 0) {
+// 2) 统一分水：同一连通网络内的多座蓄水池汇成统一水池，结合天气与品种耗水估算，
+//    按 保水优先级高→低、预计最快缺水者优先 的顺序，把有限水量浇到各地块目标水分
+// 3) 分配结果落库（缺水时前端展示明细）+ 干涸断流预警
+export function settleIrrigation(weather, absDay) {
+  const { type: weatherType, severity = 0, mods = null } = weather || {}
   const logs = []
-  const reservoirs = q("SELECT * FROM irrigation WHERE kind='reservoir'")
-  if (!reservoirs.length) return logs
+  const allReservoirs = q("SELECT * FROM irrigation WHERE kind='reservoir'")
 
-  // —— 天气补水/耗水 ——
+  // —— 天气补水/耗水（含停用中的池子：停用只是断流，池水仍受天气影响）——
   const delta = WEATHER_WATER[weatherType] || 0
-  if (delta !== 0) {
+  if (allReservoirs.length && delta !== 0) {
     const d = delta < 0 ? delta * Math.max(1, severity) : delta
-    for (const r of reservoirs) {
+    for (const r of allReservoirs) {
       const w = Math.max(0, Math.min(RESERVOIR_CAP, r.water + d))
       if (w !== r.water) run('UPDATE irrigation SET water=? WHERE id=?', w, r.id)
     }
@@ -155,44 +141,42 @@ export function settleIrrigation(weatherType, severity = 0) {
       : `🏜️ 干热蒸发，所有蓄水池水量 ${d}`)
   }
 
-  // —— 按连通关系与优先级分配有限水量 ——
-  const canals = q("SELECT * FROM irrigation WHERE kind='canal' AND active=1")
-  let totalFed = 0
-  let totalUsed = 0
-  let totalShort = 0
-  const activeRes = q("SELECT * FROM irrigation WHERE kind='reservoir' AND active=1 AND water>0")
-  for (const r of activeRes) {
-    // 每个蓄水池分配前重读地块水分，避免多池连通同一地块时按旧值重复供水
-    const plots = q('SELECT * FROM plots')
-    const { plotIds } = reachable(r, canals, plots)
-    if (!plotIds.size) continue
-    // 只浇有作物且缺水的地块；优先级高→低，同级水分低者优先
-    const targets = plots
-      .filter((p) => plotIds.has(p.id) && p.crop_id && p.water < 100)
-      .sort((a, b) => b.irr_priority - a.irr_priority || a.water - b.water)
-    let remain = r.water
-    for (const p of targets) {
-      if (remain <= 0) { totalShort++; continue }
-      const give = Math.min(100 - p.water, remain)
-      run('UPDATE plots SET water=MIN(100, water+?) WHERE id=?', give, p.id)
-      remain -= give
-      totalUsed += give
-      totalFed++
-      if (give < 100 - p.water) totalShort++ // 最后一块只浇到一部分
-    }
-    if (remain !== r.water) run('UPDATE irrigation SET water=? WHERE id=?', remain, r.id)
-  }
-  if (totalFed) {
-    logs.push(`💧 灌溉完成：${totalFed} 块地共供水 ${totalUsed}${totalShort ? `；水量不足，${totalShort} 块地未浇足` : ''}`)
+  // —— 按连通网络统一分水（网络每日实时重算，停用/拆除后自动生效）——
+  const plots = q('SELECT * FROM plots')
+  const facilities = q('SELECT * FROM irrigation')
+  const networks = buildNetworks(facilities, plots).filter((n) => n.reservoirs.length)
+  const { give, reservoirWater, report, totals, waterNow } = planAllocation({
+    networks,
+    plots,
+    cropOf: (id) => cropLike(id),
+    mods,
+    traitsDef: TRAITS,
+    cap: RESERVOIR_CAP
+  })
+  for (const [pid, g] of give) run('UPDATE plots SET water=MIN(100, water+?) WHERE id=?', g, pid)
+  for (const [rid, w] of reservoirWater) run('UPDATE irrigation SET water=? WHERE id=?', w, rid)
+
+  // —— 分配结果落库：同日覆盖（幂等），仅保留最近 10 天；无设施时也写空报告避免展示过期数据 ——
+  report.absDay = absDay
+  report.weather = weatherType
+  run('INSERT OR REPLACE INTO irrigation_report (abs_day, detail) VALUES (?,?)', absDay, JSON.stringify(report))
+  run('DELETE FROM irrigation_report WHERE abs_day < ?', absDay - 9)
+
+  if (totals.fed) {
+    logs.push(`💧 灌溉完成：${totals.fed} 块地共供水 ${totals.used}${totals.shortCount ? `；水量不足，${totals.shortCount} 块地未浇足（缺 ${totals.shortAmount}）` : ''}`)
+  } else if (totals.shortCount) {
+    logs.push(`🚱 蓄水池水量不足：${totals.shortCount} 块地未浇到水（缺 ${totals.shortAmount}）`)
   }
 
-  // —— 干涸断流预警：启用中但无水，且连通地块仍有作物缺水 ——
-  const plots = q('SELECT * FROM plots')
-  const dryRes = q("SELECT * FROM irrigation WHERE kind='reservoir' AND active=1 AND water<=0")
-  for (const r of dryRes) {
-    const { plotIds } = reachable(r, canals, plots)
-    const needy = plots.filter((p) => plotIds.has(p.id) && p.crop_id && p.water < 60).length
-    if (needy) logs.push(`⚠️ 蓄水池(${r.x},${r.y}) 干涸断流，${needy} 块地缺水，等待降雨补水`)
+  // —— 干涸断流预警：网络水池见底，且连通地块仍有作物缺水 ——
+  for (const net of networks) {
+    const netReport = report.networks.find((n) => n.id === net.id)
+    if ((netReport?.poolAfter ?? 0) > 0) continue
+    const needy = plots.filter((p) =>
+      net.plotIds.has(p.id) && p.crop_id &&
+      waterNow.get(p.id) < 60 && waterNow.get(p.id) < (p.irr_target ?? 100)
+    ).length
+    if (needy) logs.push(`⚠️ 供水网络#${net.id} 蓄水池干涸断流，${needy} 块地缺水，等待降雨补水`)
   }
   return logs
 }

@@ -111,6 +111,13 @@ CREATE TABLE IF NOT EXISTS irrigation (
   UNIQUE(x, y)
 );
 
+-- 灌溉每日分配结果：按绝对天唯一（同日重算覆盖），缺水时前端展示逐地块明细
+CREATE TABLE IF NOT EXISTS irrigation_report (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  abs_day INTEGER NOT NULL UNIQUE,
+  detail TEXT NOT NULL            -- JSON：各供水网络的池水变化与逐地块分配
+);
+
 -- 加工生产工单：批量排产，按游戏天串行推进；取消时记录取消绝对日用于退料与队列重排
 CREATE TABLE IF NOT EXISTS production_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -196,4 +203,9 @@ db.exec("INSERT OR IGNORE INTO sqlite_sequence(name,seq) VALUES('crop_varieties'
 const plotCols = db.prepare('PRAGMA table_info(plots)').all().map((c) => c.name)
 if (!plotCols.includes('irr_priority')) {
   db.exec('ALTER TABLE plots ADD COLUMN irr_priority INTEGER NOT NULL DEFAULT 1')
+}
+
+// 兼容旧存档：plots 增加目标水分（灌溉时浇到该水位为止；0 表示不自动浇水，默认 100 与旧行为一致）
+if (!plotCols.includes('irr_target')) {
+  db.exec('ALTER TABLE plots ADD COLUMN irr_target INTEGER NOT NULL DEFAULT 100')
 }

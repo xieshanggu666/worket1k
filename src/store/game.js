@@ -28,6 +28,8 @@ export const useGameStore = defineStore('game', {
     breeding: null,
     irrigation: [],
     irrigationCosts: { reservoir: 60, canal: 8 },
+    irrigationNetworks: [],  // 供水网络概览（多池连通统一分水）
+    irrigationReport: null,  // 最近一次每日供水分配结果（缺水时展示明细）
     irrBuildMode: null,      // 'reservoir' | 'canal' | null：地图放置模式
     selectedPlot: null,
     seedMode: false,
@@ -70,6 +72,8 @@ export const useGameStore = defineStore('game', {
       this.breeding = d.breeding || null
       this.irrigation = d.irrigation || []
       this.irrigationCosts = d.irrigationCosts || this.irrigationCosts
+      this.irrigationNetworks = d.irrigationNetworks || []
+      this.irrigationReport = d.irrigationReport || null
       this.loaded = true
     },
     pushLog(msg, type = 'info') {
@@ -234,6 +238,12 @@ export const useGameStore = defineStore('game', {
     async setIrrPriority(plotId, priority) {
       try {
         await api('/irrigation/priority', 'POST', { plotId, priority })
+        await this.load()
+      } catch (e) { this.showToast(e.message, 'warn') }
+    },
+    async setIrrTarget(plotId, target) {
+      try {
+        await api('/irrigation/target', 'POST', { plotId, target })
         await this.load()
       } catch (e) { this.showToast(e.message, 'warn') }
     },
